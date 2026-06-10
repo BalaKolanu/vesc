@@ -63,10 +63,12 @@ VescDriver::VescDriver(const rclcpp::NodeOptions & options)
   servo_limit_(this, "servo", 0.0, 1.0),
   driver_mode_(MODE_INITIALIZING),
   fw_version_major_(-1),
-  fw_version_minor_(-1)
+  fw_version_minor_(-1),
+  publish_imu_(false)
 {
   // get vesc serial port address
   std::string port = declare_parameter<std::string>("port", "");
+  publish_imu_ = declare_parameter<bool>("publish_imu", false);
 
   // attempt to connect to the serial port
   try {
@@ -79,8 +81,12 @@ VescDriver::VescDriver(const rclcpp::NodeOptions & options)
 
   // create vesc state (telemetry) publisher
   state_pub_ = create_publisher<VescStateStamped>("sensors/core", rclcpp::QoS{10});
-  imu_pub_ = create_publisher<VescImuStamped>("sensors/imu", rclcpp::QoS{10});
-  imu_std_pub_ = create_publisher<Imu>("sensors/imu/raw", rclcpp::QoS{10});
+  if (publish_imu_) {
+    imu_pub_ = create_publisher<VescImuStamped>("sensors/imu", rclcpp::QoS{10});
+    imu_std_pub_ = create_publisher<Imu>("sensors/imu/raw", rclcpp::QoS{10});
+  } else {
+    RCLCPP_INFO(get_logger(), "VESC IMU publishing disabled by parameter publish_imu=false");
+  }
 
   // since vesc state does not include the servo position, publish the commanded
   // servo position as a "sensor"
@@ -146,8 +152,10 @@ void VescDriver::timerCallback()
   } else if (driver_mode_ == MODE_OPERATING) {
     // poll for vesc state (telemetry)
     vesc_.requestState();
-    // poll for vesc imu
-    vesc_.requestImuData();
+    if (publish_imu_) {
+      // poll for vesc imu
+      vesc_.requestImuData();
+    }
   } else {
     // unknown mode, how did that happen?
     assert(false && "unknown driver mode");
@@ -202,6 +210,9 @@ void VescDriver::vescPacketCallback(const std::shared_ptr<VescPacket const> & pa
       fw_version->paired()
     );
   } else if (packet->name() == "ImuData") {
+    if (!publish_imu_) {
+      return;
+    }
     std::shared_ptr<VescPacketImu const> imuData =
       std::dynamic_pointer_cast<VescPacketImu const>(packet);
 
