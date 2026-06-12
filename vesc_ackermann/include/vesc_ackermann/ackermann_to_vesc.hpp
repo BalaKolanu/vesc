@@ -33,12 +33,14 @@
 
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/float64.hpp>
 
 namespace vesc_ackermann
 {
 
 using ackermann_msgs::msg::AckermannDriveStamped;
+using sensor_msgs::msg::Joy;
 using std_msgs::msg::Float64;
 
 class AckermannToVesc : public rclcpp::Node
@@ -51,16 +53,37 @@ private:
   // conversion gain and offset
   double speed_to_erpm_gain_, speed_to_erpm_offset_;
   double steering_to_servo_gain_, steering_to_servo_offset_;
+  std::string joy_topic_;
+  int deadman_button_index_;
+  int deadman_button_index_alt_;
+  double deadman_brake_current_;
+  rclcpp::Duration deadman_timeout_;
+  bool deadman_active_brake_;
 
   /** @todo consider also providing an interpolated look-up table conversion */
 
   // ROS services
   rclcpp::Publisher<Float64>::SharedPtr erpm_pub_;
+  rclcpp::Publisher<Float64>::SharedPtr brake_pub_;
   rclcpp::Publisher<Float64>::SharedPtr servo_pub_;
   rclcpp::Subscription<AckermannDriveStamped>::SharedPtr ackermann_sub_;
+  rclcpp::Subscription<Joy>::SharedPtr joy_sub_;
+  rclcpp::TimerBase::SharedPtr deadman_timer_;
+
+  // deadman state
+  bool deadman_pressed_;
+  bool have_joy_;
+  bool deadman_state_logged_;
+  bool deadman_last_active_;
+  rclcpp::Time last_joy_time_;
 
   // ROS callbacks
   void ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd);
+  void joyCallback(const Joy::SharedPtr joy_msg);
+  void deadmanTimerCallback();
+  bool deadmanActive() const;
+  void publishBrake();
+  void logDeadmanState(bool active);
 };
 
 }  // namespace vesc_ackermann
