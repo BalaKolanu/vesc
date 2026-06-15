@@ -31,10 +31,13 @@
 #ifndef VESC_ACKERMANN__ACKERMANN_TO_VESC_HPP_
 #define VESC_ACKERMANN__ACKERMANN_TO_VESC_HPP_
 
+#include <string>
+
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <vesc_msgs/msg/vesc_state_stamped.hpp>
 
 namespace vesc_ackermann
 {
@@ -42,6 +45,7 @@ namespace vesc_ackermann
 using ackermann_msgs::msg::AckermannDriveStamped;
 using sensor_msgs::msg::Joy;
 using std_msgs::msg::Float64;
+using vesc_msgs::msg::VescStateStamped;
 
 class AckermannToVesc : public rclcpp::Node
 {
@@ -57,8 +61,22 @@ private:
   int deadman_button_index_;
   int deadman_button_index_alt_;
   double deadman_brake_current_;
+  double command_timeout_brake_current_;
+  double active_brake_min_current_;
+  double active_brake_max_current_;
+  double brake_current_per_decel_;
+  double brake_current_per_speed_error_;
+  double default_decel_mps2_;
+  double brake_enter_speed_error_mps_;
+  double brake_release_speed_error_mps_;
+  double brake_min_vehicle_speed_mps_;
+  double brake_current_slew_rate_aps_;
   rclcpp::Duration deadman_timeout_;
+  rclcpp::Duration command_timeout_;
+  rclcpp::Duration vesc_state_timeout_;
   bool deadman_active_brake_;
+  bool active_braking_enabled_;
+  std::string vesc_state_topic_;
 
   /** @todo consider also providing an interpolated look-up table conversion */
 
@@ -68,21 +86,39 @@ private:
   rclcpp::Publisher<Float64>::SharedPtr servo_pub_;
   rclcpp::Subscription<AckermannDriveStamped>::SharedPtr ackermann_sub_;
   rclcpp::Subscription<Joy>::SharedPtr joy_sub_;
-  rclcpp::TimerBase::SharedPtr deadman_timer_;
+  rclcpp::Subscription<VescStateStamped>::SharedPtr vesc_state_sub_;
+  rclcpp::TimerBase::SharedPtr longitudinal_timer_;
 
   // deadman state
   bool deadman_pressed_;
   bool have_joy_;
   bool deadman_state_logged_;
   bool deadman_last_active_;
+  bool have_command_;
+  bool have_vesc_state_;
+  bool braking_active_;
+  double measured_speed_mps_;
+  double last_brake_current_;
+  std::string last_longitudinal_mode_;
+  AckermannDriveStamped last_command_;
   rclcpp::Time last_joy_time_;
+  rclcpp::Time last_command_time_;
+  rclcpp::Time last_vesc_state_time_;
+  rclcpp::Time last_brake_update_time_;
 
   // ROS callbacks
   void ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd);
   void joyCallback(const Joy::SharedPtr joy_msg);
-  void deadmanTimerCallback();
+  void vescStateCallback(const VescStateStamped::SharedPtr state);
+  void longitudinalTimerCallback();
   bool deadmanActive() const;
-  void publishBrake();
+  bool commandFresh() const;
+  bool vescStateFresh() const;
+  void applyLongitudinalCommand();
+  void publishSpeed(double speed_mps);
+  void publishBrake(double brake_current, bool apply_slew_limit);
+  double computeActiveBrakeCurrent(double requested_decel, double speed_error) const;
+  void logLongitudinalMode(const std::string & mode, double value);
   void logDeadmanState(bool active);
 };
 

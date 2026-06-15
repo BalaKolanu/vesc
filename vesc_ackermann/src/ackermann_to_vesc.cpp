@@ -30,14 +30,15 @@
 
 #include "vesc_ackermann/ackermann_to_vesc.hpp"
 
-#include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <sensor_msgs/msg/joy.hpp>
-#include <std_msgs/msg/float64.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <sstream>
 #include <string>
+
+#include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
+#include <sensor_msgs/msg/joy.hpp>
+#include <std_msgs/msg/float64.hpp>
+#include <vesc_msgs/msg/vesc_state_stamped.hpp>
 
 namespace vesc_ackermann
 {
@@ -46,15 +47,27 @@ using ackermann_msgs::msg::AckermannDriveStamped;
 using std::placeholders::_1;
 using sensor_msgs::msg::Joy;
 using std_msgs::msg::Float64;
+using vesc_msgs::msg::VescStateStamped;
 
 AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
 : Node("ackermann_to_vesc_node", options),
   deadman_timeout_(0, 0),
+  command_timeout_(0, 0),
+  vesc_state_timeout_(0, 0),
   deadman_pressed_(false),
   have_joy_(false),
   deadman_state_logged_(false),
   deadman_last_active_(false),
-  last_joy_time_(0, 0, get_clock()->get_clock_type())
+  have_command_(false),
+  have_vesc_state_(false),
+  braking_active_(false),
+  measured_speed_mps_(0.0),
+  last_brake_current_(0.0),
+  last_longitudinal_mode_(""),
+  last_joy_time_(0, 0, get_clock()->get_clock_type()),
+  last_command_time_(0, 0, get_clock()->get_clock_type()),
+  last_vesc_state_time_(0, 0, get_clock()->get_clock_type()),
+  last_brake_update_time_(0, 0, get_clock()->get_clock_type())
 {
   // get conversion parameters
   speed_to_erpm_gain_ = declare_parameter<double>("speed_to_erpm_gain", 0.0);
@@ -66,9 +79,41 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   deadman_button_index_ = declare_parameter<int>("deadman_button_index", 4);
   deadman_button_index_alt_ = declare_parameter<int>("deadman_button_index_alt", 5);
   deadman_active_brake_ = declare_parameter<bool>("deadman_active_brake", true);
-  deadman_brake_current_ = declare_parameter<double>("deadman_brake_current", 12000.0);
+  deadman_brake_current_ =
+    std::max(0.0, declare_parameter<double>("deadman_brake_current", 8.0));
+  command_timeout_brake_current_ =
+    std::max(
+    0.0, declare_parameter<double>(
+      "command_timeout_brake_current", deadman_brake_current_));
+  active_braking_enabled_ = declare_parameter<bool>("active_braking_enabled", true);
+  active_brake_min_current_ =
+    std::max(0.0, declare_parameter<double>("active_brake_min_current", 1.0));
+  active_brake_max_current_ =
+    std::max(
+    active_brake_min_current_,
+    declare_parameter<double>("active_brake_max_current", 8.0));
+  brake_current_per_decel_ =
+    std::max(0.0, declare_parameter<double>("brake_current_per_decel", 1.0));
+  brake_current_per_speed_error_ =
+    std::max(0.0, declare_parameter<double>("brake_current_per_speed_error", 2.0));
+  default_decel_mps2_ =
+    std::max(0.0, declare_parameter<double>("default_decel_mps2", 1.0));
+  brake_enter_speed_error_mps_ =
+    std::max(0.0, declare_parameter<double>("brake_enter_speed_error_mps", 0.05));
+  brake_release_speed_error_mps_ =
+    std::max(0.0, declare_parameter<double>("brake_release_speed_error_mps", 0.02));
+  brake_min_vehicle_speed_mps_ =
+    std::max(0.0, declare_parameter<double>("brake_min_vehicle_speed_mps", 0.05));
+  brake_current_slew_rate_aps_ =
+    std::max(0.0, declare_parameter<double>("brake_current_slew_rate_aps", 40.0));
+  vesc_state_topic_ =
+    declare_parameter<std::string>("vesc_state_topic", "sensors/core");
   deadman_timeout_ = rclcpp::Duration::from_seconds(
     std::max(0.0, declare_parameter<double>("deadman_timeout_sec", 0.5)));
+  command_timeout_ = rclcpp::Duration::from_seconds(
+    std::max(0.0, declare_parameter<double>("command_timeout_sec", 0.25)));
+  vesc_state_timeout_ = rclcpp::Duration::from_seconds(
+    std::max(0.0, declare_parameter<double>("vesc_state_timeout_sec", 0.25)));
 
   // create publishers to vesc electric-RPM (speed) and servo commands
   erpm_pub_ = create_publisher<Float64>("commands/motor/speed", 10);
@@ -80,33 +125,32 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
     "ackermann_cmd", 10, std::bind(&AckermannToVesc::ackermannCmdCallback, this, _1));
   joy_sub_ = create_subscription<Joy>(
     joy_topic_, 10, std::bind(&AckermannToVesc::joyCallback, this, _1));
+  vesc_state_sub_ = create_subscription<VescStateStamped>(
+    vesc_state_topic_, 10, std::bind(&AckermannToVesc::vescStateCallback, this, _1));
 
-  deadman_timer_ = create_wall_timer(
-    std::chrono::milliseconds(50),
-    std::bind(&AckermannToVesc::deadmanTimerCallback, this));
+  longitudinal_timer_ = create_wall_timer(
+    std::chrono::milliseconds(20),
+    std::bind(&AckermannToVesc::longitudinalTimerCallback, this));
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Active braking enabled=%s current=[%.1f, %.1f]A command_timeout=%.2fs state_timeout=%.2fs",
+    active_braking_enabled_ ? "true" : "false",
+    active_brake_min_current_,
+    active_brake_max_current_,
+    command_timeout_.seconds(),
+    vesc_state_timeout_.seconds());
 }
 
 void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd)
 {
-  // calc steering angle (servo)
+  last_command_ = *cmd;
+  last_command_time_ = now();
+  have_command_ = true;
+
   Float64 servo_msg;
   servo_msg.data = steering_to_servo_gain_ * cmd->drive.steering_angle + steering_to_servo_offset_;
-
-  if (!rclcpp::ok()) {
-    return;
-  }
-
-  if (deadmanActive()) {
-    Float64 erpm_msg;
-    erpm_msg.data = speed_to_erpm_gain_ * cmd->drive.speed + speed_to_erpm_offset_;
-    erpm_pub_->publish(erpm_msg);
-    servo_pub_->publish(servo_msg);
-    logDeadmanState(true);
-    return;
-  }
-
   servo_pub_->publish(servo_msg);
-  publishBrake();
 }
 
 void AckermannToVesc::joyCallback(const Joy::SharedPtr joy_msg)
@@ -126,18 +170,46 @@ void AckermannToVesc::joyCallback(const Joy::SharedPtr joy_msg)
 
   const bool active = deadmanActive();
   logDeadmanState(active);
-  if (!active) {
-    publishBrake();
-  }
 }
 
-void AckermannToVesc::deadmanTimerCallback()
+void AckermannToVesc::vescStateCallback(const VescStateStamped::SharedPtr state)
+{
+  if (std::abs(speed_to_erpm_gain_) < 1e-9) {
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Cannot convert VESC telemetry: speed_to_erpm_gain is zero");
+    return;
+  }
+  measured_speed_mps_ =
+    (state->state.speed - speed_to_erpm_offset_) / speed_to_erpm_gain_;
+  last_vesc_state_time_ = now();
+  have_vesc_state_ = true;
+}
+
+void AckermannToVesc::longitudinalTimerCallback()
 {
   const bool active = deadmanActive();
   logDeadmanState(active);
   if (!active) {
-    publishBrake();
+    braking_active_ = false;
+    if (deadman_active_brake_) {
+      publishBrake(deadman_brake_current_, false);
+      logLongitudinalMode("deadman_brake", deadman_brake_current_);
+    } else {
+      publishSpeed(0.0);
+      logLongitudinalMode("deadman_zero_speed", 0.0);
+    }
+    return;
   }
+
+  if (!commandFresh()) {
+    braking_active_ = false;
+    publishBrake(command_timeout_brake_current_, false);
+    logLongitudinalMode("command_timeout_brake", command_timeout_brake_current_);
+    return;
+  }
+
+  applyLongitudinalCommand();
 }
 
 bool AckermannToVesc::deadmanActive() const
@@ -156,15 +228,138 @@ bool AckermannToVesc::deadmanActive() const
   return deadman_pressed_;
 }
 
-void AckermannToVesc::publishBrake()
+bool AckermannToVesc::commandFresh() const
 {
-  if (!deadman_active_brake_ || !rclcpp::ok()) {
+  if (!have_command_) {
+    return false;
+  }
+  return command_timeout_.nanoseconds() <= 0 || (now() - last_command_time_) <= command_timeout_;
+}
+
+bool AckermannToVesc::vescStateFresh() const
+{
+  if (!have_vesc_state_) {
+    return false;
+  }
+  return vesc_state_timeout_.nanoseconds() <= 0 ||
+         (now() - last_vesc_state_time_) <= vesc_state_timeout_;
+}
+
+void AckermannToVesc::applyLongitudinalCommand()
+{
+  const double target_speed = static_cast<double>(last_command_.drive.speed);
+  if (!active_braking_enabled_) {
+    braking_active_ = false;
+    publishSpeed(target_speed);
+    logLongitudinalMode("speed", target_speed);
     return;
   }
 
+  if (!vescStateFresh()) {
+    braking_active_ = false;
+    publishBrake(command_timeout_brake_current_, false);
+    logLongitudinalMode("vesc_state_timeout_brake", command_timeout_brake_current_);
+    return;
+  }
+
+  const double measured_speed_abs = std::abs(measured_speed_mps_);
+  const double target_speed_abs = std::abs(target_speed);
+  const bool direction_reversal =
+    measured_speed_abs > brake_min_vehicle_speed_mps_ &&
+    target_speed_abs > brake_min_vehicle_speed_mps_ &&
+    measured_speed_mps_ * target_speed < 0.0;
+  const double speed_error = measured_speed_abs - target_speed_abs;
+
+  if (braking_active_) {
+    const bool reached_target =
+      !direction_reversal && speed_error <= brake_release_speed_error_mps_;
+    const bool nearly_stopped = measured_speed_abs <= brake_min_vehicle_speed_mps_;
+    if (reached_target || nearly_stopped) {
+      braking_active_ = false;
+    }
+  } else {
+    if (
+      direction_reversal ||
+      (measured_speed_abs > brake_min_vehicle_speed_mps_ &&
+      speed_error > brake_enter_speed_error_mps_))
+    {
+      braking_active_ = true;
+    }
+  }
+
+  if (!braking_active_) {
+    last_brake_current_ = 0.0;
+    publishSpeed(target_speed);
+    logLongitudinalMode("speed", target_speed);
+    return;
+  }
+
+  const double requested_decel =
+    std::max(
+    default_decel_mps2_,
+    std::abs(static_cast<double>(last_command_.drive.acceleration)));
+  const double brake_current =
+    computeActiveBrakeCurrent(requested_decel, std::max(0.0, speed_error));
+  publishBrake(brake_current, true);
+  logLongitudinalMode("active_brake", brake_current);
+}
+
+void AckermannToVesc::publishSpeed(double speed_mps)
+{
+  if (!rclcpp::ok()) {
+    return;
+  }
+  Float64 erpm_msg;
+  erpm_msg.data = speed_to_erpm_gain_ * speed_mps + speed_to_erpm_offset_;
+  erpm_pub_->publish(erpm_msg);
+  last_brake_current_ = 0.0;
+  last_brake_update_time_ = now();
+}
+
+void AckermannToVesc::publishBrake(double brake_current, bool apply_slew_limit)
+{
+  if (!rclcpp::ok()) {
+    return;
+  }
+
+  double command = std::max(0.0, brake_current);
+  const auto current_time = now();
+  if (apply_slew_limit && brake_current_slew_rate_aps_ > 0.0 &&
+    last_brake_update_time_.nanoseconds() > 0)
+  {
+    const double dt = std::max(0.0, (current_time - last_brake_update_time_).seconds());
+    const double max_delta = brake_current_slew_rate_aps_ * dt;
+    command = std::min(command, last_brake_current_ + max_delta);
+  }
+
   Float64 brake_msg;
-  brake_msg.data = deadman_brake_current_;
+  brake_msg.data = command;
   brake_pub_->publish(brake_msg);
+  last_brake_current_ = command;
+  last_brake_update_time_ = current_time;
+}
+
+double AckermannToVesc::computeActiveBrakeCurrent(
+  double requested_decel, double speed_error) const
+{
+  const double raw_current =
+    brake_current_per_decel_ * requested_decel +
+    brake_current_per_speed_error_ * speed_error;
+  return std::min(
+    active_brake_max_current_,
+    std::max(active_brake_min_current_, raw_current));
+}
+
+void AckermannToVesc::logLongitudinalMode(const std::string & mode, double value)
+{
+  if (mode == last_longitudinal_mode_) {
+    return;
+  }
+  last_longitudinal_mode_ = mode;
+  RCLCPP_INFO(
+    get_logger(),
+    "Longitudinal mode=%s value=%.2f target=%.2fm/s measured=%.2fm/s",
+    mode.c_str(), value, static_cast<double>(last_command_.drive.speed), measured_speed_mps_);
 }
 
 void AckermannToVesc::logDeadmanState(bool active)
@@ -178,7 +373,7 @@ void AckermannToVesc::logDeadmanState(bool active)
   if (active) {
     RCLCPP_INFO(
       get_logger(),
-      "Deadman active on buttons [%d, %d]; speed commands enabled",
+      "Deadman active on buttons [%d, %d]; longitudinal commands enabled",
       deadman_button_index_,
       deadman_button_index_alt_);
     return;
