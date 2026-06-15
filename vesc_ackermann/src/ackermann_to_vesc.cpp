@@ -80,7 +80,7 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   deadman_button_index_alt_ = declare_parameter<int>("deadman_button_index_alt", 5);
   deadman_active_brake_ = declare_parameter<bool>("deadman_active_brake", true);
   deadman_brake_current_ =
-    std::max(0.0, declare_parameter<double>("deadman_brake_current", 8.0));
+    std::max(0.0, declare_parameter<double>("deadman_brake_current", 12000.0));
   command_timeout_brake_current_ =
     std::max(
     0.0, declare_parameter<double>(
@@ -91,11 +91,11 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   active_brake_max_current_ =
     std::max(
     active_brake_min_current_,
-    declare_parameter<double>("active_brake_max_current", 8.0));
+    declare_parameter<double>("active_brake_max_current", 9.0));
   brake_current_per_decel_ =
-    std::max(0.0, declare_parameter<double>("brake_current_per_decel", 1.0));
+    std::max(0.0, declare_parameter<double>("brake_current_per_decel", 1.2));
   brake_current_per_speed_error_ =
-    std::max(0.0, declare_parameter<double>("brake_current_per_speed_error", 2.0));
+    std::max(0.0, declare_parameter<double>("brake_current_per_speed_error", 2.4));
   default_decel_mps2_ =
     std::max(0.0, declare_parameter<double>("default_decel_mps2", 1.0));
   brake_enter_speed_error_mps_ =
