@@ -117,6 +117,7 @@ private:
   int fw_version_major_;                ///< firmware major version reported by vesc
   int fw_version_minor_;                ///< firmware minor version reported by vesc
   bool publish_imu_;                    ///< whether to poll and publish the onboard VESC IMU
+  std::string imu_frame_id_;            ///< frame id stamped into published VESC IMU messages
 
   // ROS callbacks
   void brakeCallback(const Float64::SharedPtr brake);
