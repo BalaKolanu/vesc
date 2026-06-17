@@ -46,6 +46,7 @@ namespace vesc_ackermann
 using ackermann_msgs::msg::AckermannDriveStamped;
 using std::placeholders::_1;
 using sensor_msgs::msg::Joy;
+using std_msgs::msg::Bool;
 using std_msgs::msg::Float64;
 using vesc_msgs::msg::VescStateStamped;
 
@@ -54,10 +55,13 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   deadman_timeout_(0, 0),
   command_timeout_(0, 0),
   vesc_state_timeout_(0, 0),
+  autonomy_override_timeout_(0, 0),
   deadman_pressed_(false),
   have_joy_(false),
   deadman_state_logged_(false),
   deadman_last_active_(false),
+  autonomy_override_active_(false),
+  have_autonomy_override_(false),
   have_command_(false),
   have_vesc_state_(false),
   braking_active_(false),
@@ -65,6 +69,7 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   last_brake_current_(0.0),
   last_longitudinal_mode_(""),
   last_joy_time_(0, 0, get_clock()->get_clock_type()),
+  last_autonomy_override_time_(0, 0, get_clock()->get_clock_type()),
   last_command_time_(0, 0, get_clock()->get_clock_type()),
   last_vesc_state_time_(0, 0, get_clock()->get_clock_type()),
   last_brake_update_time_(0, 0, get_clock()->get_clock_type())
@@ -79,6 +84,11 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   deadman_button_index_ = declare_parameter<int>("deadman_button_index", 4);
   deadman_button_index_alt_ = declare_parameter<int>("deadman_button_index_alt", 5);
   deadman_active_brake_ = declare_parameter<bool>("deadman_active_brake", true);
+  autonomy_override_enabled_ = declare_parameter<bool>("autonomy_override_enabled", false);
+  autonomy_override_topic_ =
+    declare_parameter<std::string>("autonomy_override_topic", "/safety/autonomy_enabled");
+  autonomy_override_timeout_ = rclcpp::Duration::from_seconds(
+    std::max(0.0, declare_parameter<double>("autonomy_override_timeout_sec", 0.5)));
   deadman_brake_current_ =
     std::max(0.0, declare_parameter<double>("deadman_brake_current", 12000.0));
   command_timeout_brake_current_ =
@@ -125,6 +135,8 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
     "ackermann_cmd", 10, std::bind(&AckermannToVesc::ackermannCmdCallback, this, _1));
   joy_sub_ = create_subscription<Joy>(
     joy_topic_, 10, std::bind(&AckermannToVesc::joyCallback, this, _1));
+  autonomy_override_sub_ = create_subscription<Bool>(
+    autonomy_override_topic_, 10, std::bind(&AckermannToVesc::autonomyOverrideCallback, this, _1));
   vesc_state_sub_ = create_subscription<VescStateStamped>(
     vesc_state_topic_, 10, std::bind(&AckermannToVesc::vescStateCallback, this, _1));
 
@@ -172,6 +184,16 @@ void AckermannToVesc::joyCallback(const Joy::SharedPtr joy_msg)
   logDeadmanState(active);
 }
 
+void AckermannToVesc::autonomyOverrideCallback(const Bool::SharedPtr msg)
+{
+  have_autonomy_override_ = true;
+  autonomy_override_active_ = msg->data;
+  last_autonomy_override_time_ = now();
+
+  const bool active = deadmanActive();
+  logDeadmanState(active);
+}
+
 void AckermannToVesc::vescStateCallback(const VescStateStamped::SharedPtr state)
 {
   if (std::abs(speed_to_erpm_gain_) < 1e-9) {
@@ -214,6 +236,15 @@ void AckermannToVesc::longitudinalTimerCallback()
 
 bool AckermannToVesc::deadmanActive() const
 {
+  if (autonomy_override_enabled_ && have_autonomy_override_ && autonomy_override_active_) {
+    if (
+      autonomy_override_timeout_.nanoseconds() <= 0 ||
+      (now() - last_autonomy_override_time_) <= autonomy_override_timeout_)
+    {
+      return true;
+    }
+  }
+
   if (!have_joy_) {
     return false;
   }
@@ -371,11 +402,18 @@ void AckermannToVesc::logDeadmanState(bool active)
   deadman_state_logged_ = true;
   deadman_last_active_ = active;
   if (active) {
-    RCLCPP_INFO(
-      get_logger(),
-      "Deadman active on buttons [%d, %d]; longitudinal commands enabled",
-      deadman_button_index_,
-      deadman_button_index_alt_);
+    if (autonomy_override_enabled_ && have_autonomy_override_ && autonomy_override_active_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Autonomy override active via %s; longitudinal commands enabled",
+        autonomy_override_topic_.c_str());
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "Deadman active on buttons [%d, %d]; longitudinal commands enabled",
+        deadman_button_index_,
+        deadman_button_index_alt_);
+    }
     return;
   }
 
