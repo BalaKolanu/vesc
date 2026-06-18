@@ -55,13 +55,20 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   deadman_timeout_(0, 0),
   command_timeout_(0, 0),
   vesc_state_timeout_(0, 0),
+  deadman_active_brake_(false),
+  active_braking_enabled_(false),
+  runtime_active_braking_enabled_(false),
+  runtime_active_braking_default_enabled_(false),
+  autonomy_override_enabled_(false),
   autonomy_override_timeout_(0, 0),
+  active_braking_enable_timeout_(0, 0),
   deadman_pressed_(false),
   have_joy_(false),
   deadman_state_logged_(false),
   deadman_last_active_(false),
   autonomy_override_active_(false),
   have_autonomy_override_(false),
+  have_runtime_active_braking_(false),
   have_command_(false),
   have_vesc_state_(false),
   braking_active_(false),
@@ -70,6 +77,7 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   last_longitudinal_mode_(""),
   last_joy_time_(0, 0, get_clock()->get_clock_type()),
   last_autonomy_override_time_(0, 0, get_clock()->get_clock_type()),
+  last_active_braking_enable_time_(0, 0, get_clock()->get_clock_type()),
   last_command_time_(0, 0, get_clock()->get_clock_type()),
   last_vesc_state_time_(0, 0, get_clock()->get_clock_type()),
   last_brake_update_time_(0, 0, get_clock()->get_clock_type())
@@ -96,6 +104,13 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
     0.0, declare_parameter<double>(
       "command_timeout_brake_current", deadman_brake_current_));
   active_braking_enabled_ = declare_parameter<bool>("active_braking_enabled", true);
+  runtime_active_braking_default_enabled_ = declare_parameter<bool>(
+    "runtime_active_braking_default_enabled", active_braking_enabled_);
+  active_braking_enable_topic_ = declare_parameter<std::string>(
+    "active_braking_enable_topic", "/safety/vesc_active_braking_enabled");
+  active_braking_enable_timeout_ = rclcpp::Duration::from_seconds(
+    std::max(0.0, declare_parameter<double>("active_braking_enable_timeout_sec", 0.5)));
+  runtime_active_braking_enabled_ = runtime_active_braking_default_enabled_;
   active_brake_min_current_ =
     std::max(0.0, declare_parameter<double>("active_brake_min_current", 1.0));
   active_brake_max_current_ =
@@ -137,6 +152,9 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
     joy_topic_, 10, std::bind(&AckermannToVesc::joyCallback, this, _1));
   autonomy_override_sub_ = create_subscription<Bool>(
     autonomy_override_topic_, 10, std::bind(&AckermannToVesc::autonomyOverrideCallback, this, _1));
+  active_braking_enable_sub_ = create_subscription<Bool>(
+    active_braking_enable_topic_, 10,
+    std::bind(&AckermannToVesc::activeBrakingEnableCallback, this, _1));
   vesc_state_sub_ = create_subscription<VescStateStamped>(
     vesc_state_topic_, 10, std::bind(&AckermannToVesc::vescStateCallback, this, _1));
 
@@ -152,6 +170,12 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
     active_brake_max_current_,
     command_timeout_.seconds(),
     vesc_state_timeout_.seconds());
+  RCLCPP_INFO(
+    get_logger(),
+    "Runtime active braking topic=%s default=%s timeout=%.2fs",
+    active_braking_enable_topic_.c_str(),
+    runtime_active_braking_default_enabled_ ? "true" : "false",
+    active_braking_enable_timeout_.seconds());
 }
 
 void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd)
@@ -192,6 +216,13 @@ void AckermannToVesc::autonomyOverrideCallback(const Bool::SharedPtr msg)
 
   const bool active = deadmanActive();
   logDeadmanState(active);
+}
+
+void AckermannToVesc::activeBrakingEnableCallback(const Bool::SharedPtr msg)
+{
+  have_runtime_active_braking_ = true;
+  runtime_active_braking_enabled_ = msg->data;
+  last_active_braking_enable_time_ = now();
 }
 
 void AckermannToVesc::vescStateCallback(const VescStateStamped::SharedPtr state)
@@ -259,6 +290,26 @@ bool AckermannToVesc::deadmanActive() const
   return deadman_pressed_;
 }
 
+bool AckermannToVesc::activeBrakingAllowed() const
+{
+  if (!active_braking_enabled_) {
+    return false;
+  }
+
+  if (!have_runtime_active_braking_) {
+    return runtime_active_braking_default_enabled_;
+  }
+
+  if (
+    active_braking_enable_timeout_.nanoseconds() > 0 &&
+    (now() - last_active_braking_enable_time_) > active_braking_enable_timeout_)
+  {
+    return runtime_active_braking_default_enabled_;
+  }
+
+  return runtime_active_braking_enabled_;
+}
+
 bool AckermannToVesc::commandFresh() const
 {
   if (!have_command_) {
@@ -279,7 +330,7 @@ bool AckermannToVesc::vescStateFresh() const
 void AckermannToVesc::applyLongitudinalCommand()
 {
   const double target_speed = static_cast<double>(last_command_.drive.speed);
-  if (!active_braking_enabled_) {
+  if (!activeBrakingAllowed()) {
     braking_active_ = false;
     publishSpeed(target_speed);
     logLongitudinalMode("speed", target_speed);

@@ -78,10 +78,14 @@ private:
   rclcpp::Duration vesc_state_timeout_;
   bool deadman_active_brake_;
   bool active_braking_enabled_;
+  bool runtime_active_braking_enabled_;
+  bool runtime_active_braking_default_enabled_;
   bool autonomy_override_enabled_;
   std::string vesc_state_topic_;
   std::string autonomy_override_topic_;
+  std::string active_braking_enable_topic_;
   rclcpp::Duration autonomy_override_timeout_;
+  rclcpp::Duration active_braking_enable_timeout_;
 
   /** @todo consider also providing an interpolated look-up table conversion */
 
@@ -92,6 +96,7 @@ private:
   rclcpp::Subscription<AckermannDriveStamped>::SharedPtr ackermann_sub_;
   rclcpp::Subscription<Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<Bool>::SharedPtr autonomy_override_sub_;
+  rclcpp::Subscription<Bool>::SharedPtr active_braking_enable_sub_;
   rclcpp::Subscription<VescStateStamped>::SharedPtr vesc_state_sub_;
   rclcpp::TimerBase::SharedPtr longitudinal_timer_;
 
@@ -102,6 +107,7 @@ private:
   bool deadman_last_active_;
   bool autonomy_override_active_;
   bool have_autonomy_override_;
+  bool have_runtime_active_braking_;
   bool have_command_;
   bool have_vesc_state_;
   bool braking_active_;
@@ -111,6 +117,7 @@ private:
   AckermannDriveStamped last_command_;
   rclcpp::Time last_joy_time_;
   rclcpp::Time last_autonomy_override_time_;
+  rclcpp::Time last_active_braking_enable_time_;
   rclcpp::Time last_command_time_;
   rclcpp::Time last_vesc_state_time_;
   rclcpp::Time last_brake_update_time_;
@@ -119,9 +126,11 @@ private:
   void ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd);
   void joyCallback(const Joy::SharedPtr joy_msg);
   void autonomyOverrideCallback(const Bool::SharedPtr msg);
+  void activeBrakingEnableCallback(const Bool::SharedPtr msg);
   void vescStateCallback(const VescStateStamped::SharedPtr state);
   void longitudinalTimerCallback();
   bool deadmanActive() const;
+  bool activeBrakingAllowed() const;
   bool commandFresh() const;
   bool vescStateFresh() const;
   void applyLongitudinalCommand();
