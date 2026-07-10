@@ -118,6 +118,8 @@ private:
   int fw_version_minor_;                ///< firmware minor version reported by vesc
   bool publish_imu_;                    ///< whether to poll and publish the onboard VESC IMU
   std::string imu_frame_id_;            ///< frame id stamped into published VESC IMU messages
+  rclcpp::Duration brake_speed_holdoff_; ///< speed commands ignored briefly after brake commands
+  rclcpp::Time last_brake_command_time_;
 
   // ROS callbacks
   void brakeCallback(const Float64::SharedPtr brake);

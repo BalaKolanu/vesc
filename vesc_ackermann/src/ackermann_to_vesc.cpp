@@ -140,6 +140,15 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   vesc_state_timeout_ = rclcpp::Duration::from_seconds(
     std::max(0.0, declare_parameter<double>("vesc_state_timeout_sec", 0.25)));
 
+  deadman_active_brake_ = false;
+  deadman_brake_current_ = 0.0;
+  command_timeout_brake_current_ = 0.0;
+  active_braking_enabled_ = false;
+  runtime_active_braking_enabled_ = false;
+  runtime_active_braking_default_enabled_ = false;
+  active_brake_min_current_ = 0.0;
+  active_brake_max_current_ = 0.0;
+
   // create publishers to vesc electric-RPM (speed) and servo commands
   erpm_pub_ = create_publisher<Float64>("commands/motor/speed", 10);
   brake_pub_ = create_publisher<Float64>("commands/motor/brake", 10);
@@ -164,18 +173,12 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(
     get_logger(),
-    "Active braking enabled=%s current=[%.1f, %.1f]A command_timeout=%.2fs state_timeout=%.2fs",
-    active_braking_enabled_ ? "true" : "false",
-    active_brake_min_current_,
-    active_brake_max_current_,
+    "VESC braking disabled in ackermann shim; command_timeout=%.2fs state_timeout=%.2fs",
     command_timeout_.seconds(),
     vesc_state_timeout_.seconds());
   RCLCPP_INFO(
     get_logger(),
-    "Runtime active braking topic=%s default=%s timeout=%.2fs",
-    active_braking_enable_topic_.c_str(),
-    runtime_active_braking_default_enabled_ ? "true" : "false",
-    active_braking_enable_timeout_.seconds());
+    "Ackermann shim brake commands are suppressed; direct brake topic publishers remain active");
 }
 
 void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd)
@@ -245,20 +248,15 @@ void AckermannToVesc::longitudinalTimerCallback()
   logDeadmanState(active);
   if (!active) {
     braking_active_ = false;
-    if (deadman_active_brake_) {
-      publishBrake(deadman_brake_current_, false);
-      logLongitudinalMode("deadman_brake", deadman_brake_current_);
-    } else {
-      publishSpeed(0.0);
-      logLongitudinalMode("deadman_zero_speed", 0.0);
-    }
+    publishSpeed(0.0);
+    logLongitudinalMode("deadman_zero_speed", 0.0);
     return;
   }
 
   if (!commandFresh()) {
     braking_active_ = false;
-    publishBrake(command_timeout_brake_current_, false);
-    logLongitudinalMode("command_timeout_brake", command_timeout_brake_current_);
+    publishSpeed(0.0);
+    logLongitudinalMode("command_timeout_zero_speed", 0.0);
     return;
   }
 
@@ -292,22 +290,7 @@ bool AckermannToVesc::deadmanActive() const
 
 bool AckermannToVesc::activeBrakingAllowed() const
 {
-  if (!active_braking_enabled_) {
-    return false;
-  }
-
-  if (!have_runtime_active_braking_) {
-    return runtime_active_braking_default_enabled_;
-  }
-
-  if (
-    active_braking_enable_timeout_.nanoseconds() > 0 &&
-    (now() - last_active_braking_enable_time_) > active_braking_enable_timeout_)
-  {
-    return runtime_active_braking_default_enabled_;
-  }
-
-  return runtime_active_braking_enabled_;
+  return false;
 }
 
 bool AckermannToVesc::commandFresh() const
@@ -400,25 +383,10 @@ void AckermannToVesc::publishSpeed(double speed_mps)
 
 void AckermannToVesc::publishBrake(double brake_current, bool apply_slew_limit)
 {
-  if (!rclcpp::ok()) {
-    return;
-  }
-
-  double command = std::max(0.0, brake_current);
-  const auto current_time = now();
-  if (apply_slew_limit && brake_current_slew_rate_aps_ > 0.0 &&
-    last_brake_update_time_.nanoseconds() > 0)
-  {
-    const double dt = std::max(0.0, (current_time - last_brake_update_time_).seconds());
-    const double max_delta = brake_current_slew_rate_aps_ * dt;
-    command = std::min(command, last_brake_current_ + max_delta);
-  }
-
-  Float64 brake_msg;
-  brake_msg.data = command;
-  brake_pub_->publish(brake_msg);
-  last_brake_current_ = command;
-  last_brake_update_time_ = current_time;
+  (void) brake_current;
+  (void) apply_slew_limit;
+  last_brake_current_ = 0.0;
+  last_brake_update_time_ = now();
 }
 
 double AckermannToVesc::computeActiveBrakeCurrent(
@@ -470,8 +438,7 @@ void AckermannToVesc::logDeadmanState(bool active)
 
   RCLCPP_WARN(
     get_logger(),
-    "Deadman inactive; publishing active brake current %.1f",
-    deadman_brake_current_);
+    "Deadman inactive; publishing zero speed");
 }
 
 }  // namespace vesc_ackermann

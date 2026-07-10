@@ -64,12 +64,16 @@ VescDriver::VescDriver(const rclcpp::NodeOptions & options)
   driver_mode_(MODE_INITIALIZING),
   fw_version_major_(-1),
   fw_version_minor_(-1),
-  publish_imu_(false)
+  publish_imu_(false),
+  brake_speed_holdoff_(0, 0),
+  last_brake_command_time_(0, 0, get_clock()->get_clock_type())
 {
   // get vesc serial port address
   std::string port = declare_parameter<std::string>("port", "");
   publish_imu_ = declare_parameter<bool>("publish_imu", false);
   imu_frame_id_ = declare_parameter<std::string>("imu_frame_id", "base_link");
+  brake_speed_holdoff_ = rclcpp::Duration::from_seconds(
+    std::max(0.0, declare_parameter<double>("brake_speed_holdoff_sec", 0.10)));
 
   // attempt to connect to the serial port
   try {
@@ -309,7 +313,13 @@ void VescDriver::currentCallback(const Float64::SharedPtr current)
 void VescDriver::brakeCallback(const Float64::SharedPtr brake)
 {
   if (driver_mode_ == MODE_OPERATING) {
-    vesc_.setBrake(brake_limit_.clip(brake->data));
+    const double clipped_brake = brake_limit_.clip(brake->data);
+    if (clipped_brake > 0.0) {
+      last_brake_command_time_ = now();
+    } else {
+      last_brake_command_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    }
+    vesc_.setBrake(clipped_brake);
   }
 }
 
@@ -322,6 +332,13 @@ void VescDriver::brakeCallback(const Float64::SharedPtr brake)
 void VescDriver::speedCallback(const Float64::SharedPtr speed)
 {
   if (driver_mode_ == MODE_OPERATING) {
+    if (
+      brake_speed_holdoff_.nanoseconds() > 0 &&
+      last_brake_command_time_.nanoseconds() > 0 &&
+      (now() - last_brake_command_time_) <= brake_speed_holdoff_)
+    {
+      return;
+    }
     vesc_.setSpeed(speed_limit_.clip(speed->data));
   }
 }
