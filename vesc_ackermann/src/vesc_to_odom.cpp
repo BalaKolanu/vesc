@@ -69,6 +69,9 @@ VescToOdom::VescToOdom(const rclcpp::NodeOptions & options)
     steering_to_servo_offset_ =
       declare_parameter<double>("steering_angle_to_servo_offset", 0.0);
     wheelbase_ = declare_parameter<double>("wheelbase", 0.0);
+
+    last_servo_cmd_ = std::make_shared<Float64>();
+    last_servo_cmd_->data = steering_to_servo_offset_;
   }
 
   publish_tf_ = declare_parameter("publish_tf", publish_tf_);
@@ -93,11 +96,6 @@ VescToOdom::VescToOdom(const rclcpp::NodeOptions & options)
 
 void VescToOdom::vescStateCallback(const VescStateStamped::SharedPtr state)
 {
-  // check that we have a last servo command if we are depending on it for angular velocity
-  if (use_servo_cmd_ && !last_servo_cmd_) {
-    return;
-  }
-
   // convert to engineering units
   double current_speed = (-state->state.speed - speed_to_erpm_offset_) / speed_to_erpm_gain_;
   if (std::fabs(current_speed) < 0.05) {
