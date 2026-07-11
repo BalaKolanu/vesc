@@ -111,13 +111,6 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
   vesc_state_timeout_ = rclcpp::Duration::from_seconds(
     std::max(0.0, declare_parameter<double>("vesc_state_timeout_sec", 0.25)));
 
-  command_timeout_brake_current_ = 0.0;
-  active_braking_enabled_ = false;
-  runtime_active_braking_enabled_ = false;
-  runtime_active_braking_default_enabled_ = false;
-  active_brake_min_current_ = 0.0;
-  active_brake_max_current_ = 0.0;
-
   // create publishers to vesc electric-RPM (speed) and servo commands
   erpm_pub_ = create_publisher<Float64>("commands/motor/speed", 10);
   brake_pub_ = create_publisher<Float64>("commands/motor/brake", 10);
@@ -138,12 +131,12 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(
     get_logger(),
-    "VESC command gate uses command freshness only; command_timeout=%.2fs state_timeout=%.2fs",
+    "VESC command gate uses muxed Ackermann commands; command_timeout=%.2fs state_timeout=%.2fs",
     command_timeout_.seconds(),
     vesc_state_timeout_.seconds());
   RCLCPP_INFO(
     get_logger(),
-    "Ackermann shim brake commands are suppressed; direct brake topic publishers remain active");
+    "Negative Ackermann acceleration requests brake current on the mux-selected command");
 }
 
 void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd)
@@ -192,7 +185,18 @@ void AckermannToVesc::longitudinalTimerCallback()
 
 bool AckermannToVesc::activeBrakingAllowed() const
 {
-  return false;
+  if (!active_braking_enabled_) {
+    return false;
+  }
+  if (!have_runtime_active_braking_) {
+    return runtime_active_braking_default_enabled_;
+  }
+  const bool runtime_fresh = active_braking_enable_timeout_.nanoseconds() <= 0 ||
+    (now() - last_active_braking_enable_time_) <= active_braking_enable_timeout_;
+  if (!runtime_fresh) {
+    return runtime_active_braking_default_enabled_;
+  }
+  return runtime_active_braking_enabled_;
 }
 
 bool AckermannToVesc::commandFresh() const
@@ -215,6 +219,15 @@ bool AckermannToVesc::vescStateFresh() const
 void AckermannToVesc::applyLongitudinalCommand()
 {
   const double target_speed = static_cast<double>(last_command_.drive.speed);
+  const double requested_brake_current =
+    std::max(0.0, -static_cast<double>(last_command_.drive.acceleration));
+  if (requested_brake_current > 0.0) {
+    braking_active_ = true;
+    publishBrake(requested_brake_current, false);
+    logLongitudinalMode("commanded_brake", requested_brake_current);
+    return;
+  }
+
   if (!activeBrakingAllowed()) {
     braking_active_ = false;
     publishSpeed(target_speed);
@@ -285,9 +298,27 @@ void AckermannToVesc::publishSpeed(double speed_mps)
 
 void AckermannToVesc::publishBrake(double brake_current, bool apply_slew_limit)
 {
-  (void) brake_current;
-  (void) apply_slew_limit;
-  last_brake_current_ = 0.0;
+  if (!rclcpp::ok()) {
+    return;
+  }
+
+  const rclcpp::Time update_time = now();
+  double command = std::max(0.0, brake_current);
+  if (apply_slew_limit && brake_current_slew_rate_aps_ > 0.0) {
+    double dt = 0.0;
+    if (last_brake_update_time_.nanoseconds() > 0) {
+      dt = std::max(0.0, (update_time - last_brake_update_time_).seconds());
+    }
+    const double max_delta = brake_current_slew_rate_aps_ * dt;
+    if (max_delta > 0.0) {
+      command = std::min(command, last_brake_current_ + max_delta);
+    }
+  }
+
+  Float64 brake_msg;
+  brake_msg.data = command;
+  brake_pub_->publish(brake_msg);
+  last_brake_current_ = command;
   last_brake_update_time_ = now();
 }
 
