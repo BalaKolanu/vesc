@@ -43,6 +43,14 @@
 namespace vesc_driver
 {
 
+namespace
+{
+
+constexpr double kStandardGravity = 9.80665;
+constexpr double kDegreesToRadians = M_PI / 180.0;
+
+}  // namespace
+
 using namespace std::chrono_literals;
 using std::placeholders::_1;
 using std_msgs::msg::Float64;
@@ -249,13 +257,18 @@ void VescDriver::vescPacketCallback(const std::shared_ptr<VescPacket const> & pa
     imu_msg.imu.orientation.y = imuData->q_y();
     imu_msg.imu.orientation.z = imuData->q_z();
 
-    std_imu_msg.linear_acceleration.x = imuData->acc_x();
-    std_imu_msg.linear_acceleration.y = imuData->acc_y();
-    std_imu_msg.linear_acceleration.z = imuData->acc_z();
+    // VESC IMU packets report acceleration in g and angular velocity in
+    // degrees/second. sensor_msgs/Imu requires m/s^2 and radians/second.
+    // Keep the custom VescImuStamped message above in its legacy native units.
+    std_imu_msg.linear_acceleration.x = imuData->acc_x() * kStandardGravity;
+    std_imu_msg.linear_acceleration.y = imuData->acc_y() * kStandardGravity;
+    std_imu_msg.linear_acceleration.z = imuData->acc_z() * kStandardGravity;
 
-    std_imu_msg.angular_velocity.x = imuData->gyr_x();
-    std_imu_msg.angular_velocity.y = imuData->gyr_y();
-    std_imu_msg.angular_velocity.z = imuData->gyr_z();
+    std_imu_msg.angular_velocity.x = imuData->gyr_x() * kDegreesToRadians;
+    std_imu_msg.angular_velocity.y = imuData->gyr_y() * kDegreesToRadians;
+    // Live comparison against quaternion yaw and PF localization shows that
+    // the installed VESC's native Z gyro axis is opposite ROS base_link yaw.
+    std_imu_msg.angular_velocity.z = -imuData->gyr_z() * kDegreesToRadians;
 
     std_imu_msg.orientation.w = imuData->q_w();
     std_imu_msg.orientation.x = imuData->q_x();
