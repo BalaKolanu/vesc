@@ -339,10 +339,10 @@ void AckermannToVesc::logLongitudinalMode(const std::string & mode, double value
     return;
   }
   last_longitudinal_mode_ = mode;
-  RCLCPP_INFO(
-    get_logger(),
-    "Longitudinal mode=%s value=%.2f target=%.2fm/s measured=%.2fm/s",
-    mode.c_str(), value, static_cast<double>(last_command_.drive.speed), measured_speed_mps_);
+  // RCLCPP_INFO(
+  //   get_logger(),
+  //   "Longitudinal mode=%s value=%.2f target=%.2fm/s measured=%.2fm/s",
+  //   mode.c_str(), value, static_cast<double>(last_command_.drive.speed), measured_speed_mps_);
 }
 
 }  // namespace vesc_ackermann
